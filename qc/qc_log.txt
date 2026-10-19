@@ -1,0 +1,6 @@
+QC of ADTTE (TTDE)
+  Subjects: production 254 | QC 254 
+  Mismatched records: 0 
+  Events by arm (prod / QC): 28/28, 62/62, 58/58 
+  Hazard ratios (prod / QC): 4.2931/4.2931, 5.3003/5.3003 
+  RESULT: production and QC agree.

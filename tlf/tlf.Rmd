@@ -1,0 +1,288 @@
+---
+title: "CDISCPILOT01: Tables, Listings and Figures"
+output:
+  github_document:
+    toc: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.width = 7.5, fig.height = 4.8, dpi = 150,
+                      fig.path = "figures/")
+knitr::opts_knit$set(root.dir = "..")
+library(dplyr)
+library(tidyr)
+library(survival)
+library(ggplot2)
+theme_set(theme_minimal(base_size = 12))
+```
+
+```{r data}
+adsl  <- readRDS("data/adam/adsl.rds")
+adae  <- readRDS("data/adam/adae.rds")
+adtte <- readRDS("data/adam/adtte.rds")
+
+arms <- c("Placebo", "Xanomeline Low Dose", "Xanomeline High Dose")
+saf  <- filter(adsl, SAFFL == "Y")
+N    <- table(saf$TRT01A)
+hdr  <- c(sprintf("%s (N=%d)", arms, N[arms]), sprintf("Total (N=%d)", nrow(saf)))
+
+# Helpers ---------------------------------------------------------------
+npct <- function(n, d) ifelse(n == 0, "0", sprintf("%d (%.1f)", n, 100 * n / d))
+
+cat_rows <- function(data, var, label, denom) {
+  data |>
+    mutate(TRT = TRT01A, .val = .data[[var]]) |>
+    bind_rows(mutate(data, TRT = "Total", .val = .data[[var]])) |>
+    count(TRT, .val) |>
+    mutate(d = denom[as.character(TRT)], cell = npct(n, d)) |>
+    select(TRT, .val, cell) |>
+    pivot_wider(names_from = TRT, values_from = cell, values_fill = "0") |>
+    mutate(Parameter = c(label, rep("", n() - 1)), Category = as.character(.val)) |>
+    select(Parameter, Category, all_of(c(arms, "Total")))
+}
+denom_saf <- c(setNames(as.numeric(N[arms]), arms), Total = nrow(saf))
+
+show <- function(tab, caption) {
+  names(tab)[names(tab) %in% c(arms, "Total")] <- hdr
+  knitr::kable(tab, caption = caption, align = c("l", "l", rep("r", 4)))
+}
+```
+
+All tables are based on the Safety population and summarized by actual treatment unless stated otherwise. Percentages use the number of patients in each column as the denominator. Analyses follow the [statistical analysis plan](../sap/SAP.md).
+
+## Table 14.1.1 Patient disposition
+
+*Population: randomized patients*
+
+```{r t-disposition}
+rand <- filter(adsl, RANDFL == "Y") |> mutate(TRT01A = factor(as.character(TRT01P), arms))
+Nr   <- table(rand$TRT01A)
+denom_r <- c(setNames(as.numeric(Nr[arms]), arms), Total = nrow(rand))
+
+disp <- bind_rows(
+  cat_rows(mutate(rand, x = ""), "x", "Randomized", denom_r),
+  cat_rows(filter(rand, SAFFL == "Y") |> mutate(x = "Received study treatment"), "x", "Safety population", denom_r),
+  cat_rows(mutate(rand, EOSSTT = tools::toTitleCase(tolower(EOSSTT))), "EOSSTT", "Study status", denom_r),
+  cat_rows(filter(rand, EOSSTT == "DISCONTINUED") |> mutate(DCSREAS = tools::toTitleCase(tolower(DCSREAS))),
+           "DCSREAS", "Reason for discontinuation", denom_r)
+)
+names(disp)[names(disp) %in% c(arms, "Total")] <- sprintf("%s (N=%d)", c(arms, "Total"), denom_r)
+knitr::kable(disp, align = c("l", "l", rep("r", 4)),
+             caption = "Columns use planned (randomized) treatment.")
+```
+
+## Table 14.1.2 Demographic and baseline characteristics
+
+```{r t-demog}
+cont_rows <- function(data, var, label) {
+  data |>
+    mutate(TRT = TRT01A) |>
+    bind_rows(mutate(data, TRT = "Total")) |>
+    group_by(TRT) |>
+    summarise(
+      n        = as.character(sum(!is.na(.data[[var]]))),
+      `Mean (SD)` = sprintf("%.1f (%.2f)", mean(.data[[var]]), sd(.data[[var]])),
+      Median   = sprintf("%.1f", median(.data[[var]])),
+      `Min, Max` = sprintf("%d, %d", as.integer(min(.data[[var]])), as.integer(max(.data[[var]]))),
+      .groups = "drop"
+    ) |>
+    pivot_longer(-TRT, names_to = "Category") |>
+    pivot_wider(names_from = TRT, values_from = value) |>
+    mutate(Parameter = c(label, rep("", n() - 1))) |>
+    select(Parameter, Category, all_of(c(arms, "Total")))
+}
+
+saf_fmt <- saf |>
+  mutate(SEX = recode(SEX, F = "Female", M = "Male"),
+         RACE = tools::toTitleCase(tolower(RACE)),
+         ETHNIC = tools::toTitleCase(tolower(ETHNIC)))
+
+bind_rows(
+  cont_rows(saf_fmt, "AGE", "Age (years)"),
+  cat_rows(saf_fmt, "AGEGR1", "Age group, n (%)", denom_saf),
+  cat_rows(saf_fmt, "SEX", "Sex, n (%)", denom_saf),
+  cat_rows(saf_fmt, "RACE", "Race, n (%)", denom_saf),
+  cat_rows(saf_fmt, "ETHNIC", "Ethnicity, n (%)", denom_saf)
+) |> show("Safety population")
+```
+
+```{r trt-switch, include = FALSE}
+n_switch <- sum(as.character(saf$TRT01P) != as.character(saf$TRT01A))
+```
+
+Actual treatment differed from planned treatment for `r n_switch` patients randomized to high dose who received the low dose, which is why the actual-treatment columns have 96 and 72 patients rather than 84 and 84.
+
+## Table 14.3.1 Overview of treatment-emergent adverse events
+
+```{r t-ae-overview}
+teae <- filter(adae, TRTEMFL == "Y", SAFFL == "Y")
+
+any_pat <- function(cond, label) {
+  ids <- teae |> filter({{ cond }}) |> distinct(USUBJID, TRT01A)
+  counts <- c(table(factor(ids$TRT01A, arms)), Total = nrow(ids))
+  tibble(Category = label, !!!setNames(as.list(npct(counts, denom_saf[names(counts)])), names(counts)))
+}
+
+bind_rows(
+  any_pat(TRUE, "Any TEAE"),
+  any_pat(AESER == "Y", "Any serious TEAE"),
+  any_pat(AESEV == "SEVERE", "Any severe TEAE"),
+  any_pat(AEREL %in% c("POSSIBLE", "PROBABLE"), "Any possibly or probably related TEAE"),
+  any_pat(AEOUT == "FATAL", "Any TEAE leading to death"),
+  any_pat(CQ01NAM == "DERMATOLOGIC EVENTS", "Any dermatologic TEAE")
+) |>
+  mutate(Parameter = "Patients with, n (%)", .before = 1) |>
+  mutate(Parameter = c(Parameter[1], rep("", n() - 1))) |>
+  show("Safety population")
+```
+
+## Table 14.3.2 TEAEs by system organ class and preferred term
+
+*Preferred terms reported in at least 5% of patients in any treatment group*
+
+```{r t-ae-socpt}
+pt_counts <- teae |>
+  distinct(USUBJID, TRT01A, AESOC, AEDECOD) |>
+  count(AESOC, AEDECOD, TRT01A, .drop = FALSE, name = "n") |>
+  complete(nesting(AESOC, AEDECOD), TRT01A = factor(arms, arms), fill = list(n = 0)) |>
+  mutate(pct = 100 * n / as.numeric(N[as.character(TRT01A)]))
+
+keep_pt <- pt_counts |> group_by(AESOC, AEDECOD) |> filter(max(pct) >= 5) |> ungroup()
+
+soc_counts <- teae |>
+  filter(AESOC %in% keep_pt$AESOC) |>
+  distinct(USUBJID, TRT01A, AESOC) |>
+  count(AESOC, TRT01A) |>
+  complete(AESOC, TRT01A = factor(arms, arms), fill = list(n = 0))
+
+fmt_wide <- function(d, label_col) {
+  d |>
+    mutate(cell = npct(n, as.numeric(N[as.character(TRT01A)]))) |>
+    select(-any_of(c("n", "pct"))) |>
+    pivot_wider(names_from = TRT01A, values_from = cell)
+}
+
+soc_wide <- fmt_wide(soc_counts) |> mutate(AEDECOD = NA_character_)
+pt_wide  <- fmt_wide(select(keep_pt, -pct))
+
+soc_order <- soc_counts |> group_by(AESOC) |> summarise(tot = sum(n)) |> arrange(desc(tot))
+pt_order  <- keep_pt |> group_by(AESOC, AEDECOD) |> summarise(tot = sum(n), .groups = "drop")
+
+bind_rows(soc_wide, pt_wide) |>
+  left_join(pt_order, by = c("AESOC", "AEDECOD")) |>
+  mutate(AESOC = factor(AESOC, soc_order$AESOC),
+         is_soc = is.na(AEDECOD)) |>
+  arrange(AESOC, desc(is_soc), desc(tot)) |>
+  transmute(`System organ class / Preferred term` =
+              if_else(is_soc, tools::toTitleCase(tolower(as.character(AESOC))),
+                      paste0("    ", tools::toTitleCase(tolower(AEDECOD)))),
+            !!!syms(arms)) |>
+  rename_with(~ sprintf("%s (N=%d)", .x, N[.x]), all_of(arms)) |>
+  knitr::kable(align = c("l", "r", "r", "r"),
+               caption = "Patients are counted once per SOC and once per PT. n (%)")
+```
+
+## Table 14.3.3 Time to first dermatologic adverse event
+
+```{r t-tte}
+adtte <- adtte |> mutate(TRT01A = factor(TRT01A, arms))
+km    <- survfit(Surv(AVAL, 1 - CNSR) ~ TRT01A, data = adtte)
+cox   <- coxph(Surv(AVAL, 1 - CNSR) ~ TRT01A, data = adtte)
+lr    <- survdiff(Surv(AVAL, 1 - CNSR) ~ TRT01A, data = adtte)
+lr_p  <- pchisq(lr$chisq, df = length(lr$n) - 1, lower.tail = FALSE)
+zph   <- cox.zph(cox)
+
+ev   <- adtte |> group_by(TRT01A) |> summarise(n = n(), e = sum(CNSR == 0), c = sum(CNSR == 1))
+med  <- summary(km)$table[, c("median", "0.95LCL", "0.95UCL")]
+fmt_med <- function(i) {
+  m <- med[i, ]
+  f <- function(x) ifelse(is.na(x), "NE", sprintf("%.0f", x))
+  sprintf("%s (%s, %s)", f(m[1]), f(m[2]), f(m[3]))
+}
+weeks <- c(2, 4, 8, 12)
+skm   <- summary(km, times = weeks * 7, extend = TRUE)
+rate  <- matrix(sprintf("%.1f (%.1f, %.1f)", 100 * skm$surv, 100 * skm$lower, 100 * skm$upper),
+                nrow = length(weeks))
+
+hr <- exp(cbind(coef(cox), confint(cox)))
+hr_txt <- c("Reference", sprintf("%.2f (%.2f, %.2f)", hr[, 1], hr[, 2], hr[, 3]))
+p_txt  <- c("", sprintf("%.4f", summary(cox)$coefficients[, "Pr(>|z|)"]))
+p_txt[p_txt == "0.0000"] <- "<0.0001"
+
+tte_tab <- rbind(
+  c("Patients with event, n (%)", npct(ev$e, ev$n)),
+  c("Patients censored, n (%)",   npct(ev$c, ev$n)),
+  c("Median time to event, days (95% CI)", sapply(1:3, fmt_med)),
+  cbind(sprintf("Event-free at week %d, %% (95%% CI)", weeks), rate),
+  c("Hazard ratio vs. placebo (95% CI)", hr_txt),
+  c("Cox p-value vs. placebo", p_txt)
+)
+colnames(tte_tab) <- c("", sprintf("%s (N=%d)", arms, ev$n))
+knitr::kable(tte_tab, align = c("l", "r", "r", "r"),
+             caption = sprintf("Kaplan–Meier estimates; Cox model with treatment as the only covariate. Log-rank test across the three groups: p %s. NE = not estimable.",
+                               ifelse(lr_p < 0.0001, "< 0.0001", sprintf("= %.4f", lr_p))))
+```
+
+**Proportional hazards check (scaled Schoenfeld residuals):** global p = `r sprintf("%.3f", zph$table["GLOBAL", "p"])`.
+
+```{r derm-counts, include = FALSE}
+n_derm_teae <- teae |> filter(CQ01NAM == "DERMATOLOGIC EVENTS") |> distinct(USUBJID) |> nrow()
+n_derm_evt  <- sum(adtte$CNSR == 0)
+```
+
+Table 14.3.1 counts `r n_derm_teae` patients with a dermatologic TEAE, while this table counts `r n_derm_evt` events. The difference is by design: TEAEs include onsets up to 30 days after the last dose, but the primary endpoint counts only events during treatment (SAP section 4.4).
+
+## Figure 14.3.1 Kaplan–Meier plot of time to first dermatologic adverse event
+
+```{r f-km, fig.height = 5.6}
+km_df <- tibble(
+  time = km$time, surv = km$surv, lower = km$lower, upper = km$upper, n.censor = km$n.censor,
+  TRT01A = factor(rep(sub("TRT01A=", "", names(km$strata)), km$strata), arms)
+)
+start <- tibble(time = 0, surv = 1, lower = 1, upper = 1, n.censor = 0, TRT01A = factor(arms, arms))
+km_df <- bind_rows(start, km_df)
+
+pal <- c("#7f8c8d", "#1b6ca8", "#c0392b")
+p_km <- ggplot(km_df, aes(time, surv, colour = TRT01A)) +
+  geom_step(linewidth = 0.8) +
+  geom_point(data = filter(km_df, n.censor > 0), shape = 3, size = 1.6) +
+  scale_colour_manual(values = pal) +
+  scale_x_continuous(breaks = seq(0, 196, 28)) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(x = "Days since first dose", y = "Free of dermatologic AE", colour = NULL,
+       caption = "+ censored at end of treatment") +
+  theme(legend.position = "top")
+
+risk_times <- seq(0, 196, 28)
+risk <- summary(km, times = risk_times, extend = TRUE)
+risk_df <- tibble(time = risk$time, n = risk$n.risk,
+                  TRT01A = factor(sub("TRT01A=", "", risk$strata), arms))
+p_risk <- ggplot(risk_df, aes(time, TRT01A, label = n, colour = TRT01A)) +
+  geom_text(size = 3.4) +
+  scale_colour_manual(values = pal, guide = "none") +
+  scale_x_continuous(breaks = risk_times, limits = range(risk_times) + c(-6, 6)) +
+  scale_y_discrete(limits = rev(arms), labels = c("Placebo" = "Placebo", "Xanomeline Low Dose" = "Low dose", "Xanomeline High Dose" = "High dose")) +
+  labs(x = NULL, y = NULL, title = "Number at risk") +
+  theme_void(base_size = 11) +
+  theme(axis.text.y = element_text(hjust = 1), plot.title = element_text(size = 10))
+
+patchwork::wrap_plots(p_km, p_risk, ncol = 1, heights = c(4, 1))
+```
+
+## Listing 16.2.1 Patients who died
+
+```{r l-deaths}
+saf |>
+  filter(!is.na(DTHDT)) |>
+  left_join(adae |> filter(AEOUT == "FATAL") |> select(USUBJID, `Fatal AE (PT)` = AEDECOD), by = "USUBJID") |>
+  transmute(`Patient ID` = USUBJID, Treatment = TRT01A, Age = AGE, Sex = SEX,
+            `First dose` = TRTSDT, `Last dose` = TRTEDT, `Date of death` = DTHDT,
+            `Fatal AE (PT)` = tools::toTitleCase(tolower(`Fatal AE (PT)`))) |>
+  arrange(Treatment, `Patient ID`) |>
+  knitr::kable()
+```
+
+---
+
+*Generated from ADaM datasets built with `admiral` `r packageVersion("admiral")` from `pharmaversesdtm` CDISCPILOT01 SDTM data. R `r getRversion()`.*
